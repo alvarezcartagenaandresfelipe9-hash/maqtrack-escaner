@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex">
+  <title>Escanear QR · MaqTrack</title>
+  <!--
+    MaqTrack · Escáner en vivo
+    Esta página va FUERA de Apps Script (por ejemplo en GitHub Pages) porque
+    Apps Script no deja usar la cámara en vivo.
+    No hay que editar nada aquí: MaqTrack le pasa su dirección al abrirla
+    (…/?app=https://script.google.com/…/exec). Lee el QR y vuelve a MaqTrack
+    con el código (…/exec?page=escaner&qr=CODIGO). No guarda ningún dato.
+  -->
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    [hidden] { display: none !important; }
+
+    html, body { height: 100%; }
+
+    body {
+      font-family: Arial, Helvetica, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      display: flex;
+      flex-direction: column;
+      padding-top: env(safe-area-inset-top, 0px);
+      padding-bottom: env(safe-area-inset-bottom, 0px);
+    }
+
+    .barra {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 14px 4%;
+    }
+
+    .barra h1 { flex: 1; text-align: center; font-size: 16px; color: #f1f5f9; }
+
+    .boton-redondo {
+      width: 44px;
+      height: 44px;
+      flex-shrink: 0;
+      border: none;
+      border-radius: 50%;
+      background: #1e3a5f;
+      color: #7db3e8;
+      font-size: 22px;
+      font-family: inherit;
+      text-decoration: none;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .boton-redondo.encendida { background: #f6c945; color: #172a43; }
+    .hueco { width: 44px; height: 44px; flex-shrink: 0; }
+
+    main {
+      flex: 1;
+      width: 100%;
+      max-width: 520px;
+      margin: 0 auto;
+      padding: 4px 4% 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .visor {
+      position: relative;
+      width: 100%;
+      aspect-ratio: 1;
+      background: #000;
+      border: 3px solid #2463aa;
+      border-radius: 20px;
+      overflow: hidden;
+    }
+
+    .visor video {
+      position: absolute;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+
+    /* cuadro que indica dónde poner el QR */
+    .mira {
+      position: absolute;
+      inset: 16%;
+      border: 3px solid rgba(255, 255, 255, 0.9);
+      border-radius: 18px;
+      box-shadow: 0 0 0 100vmax rgba(0, 0, 0, 0.35);
+      pointer-events: none;
+    }
+
+    .mensaje {
+      font-size: 16px;
+      line-height: 1.45;
+      text-align: center;
+      color: #cbd5e1;
+      min-height: 46px;
+    }
+    .mensaje.error { color: #ff8f8f; font-weight: bold; }
+    .mensaje.listo { color: #6ee7a8; font-weight: bold; }
+
+    .btn {
+      width: 100%;
+      min-height: 56px;
+      padding: 12px 16px;
+      border: 2px solid transparent;
+      border-radius: 14px;
+      font-family: inherit;
+      font-size: 17px;
+      font-weight: bold;
+      line-height: 1.2;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      text-decoration: none;
+    }
+    .btn-azul { background: #2463aa; color: #fff; }
+    .btn-claro { background: #1e293b; color: #e2e8f0; border-color: #334155; min-height: 50px; font-size: 15px; }
+
+    .btn:focus-visible, .boton-redondo:focus-visible { outline: 3px solid #7db3e8; outline-offset: 2px; }
+  </style>
+</head>
+<body>
+
+  <header class="barra">
+    <a class="boton-redondo" id="volver" href="#" aria-label="Volver a MaqTrack" hidden>‹</a>
+    <span class="hueco" id="huecoIzq"></span>
+    <h1>Escanear código QR</h1>
+    <button type="button" class="boton-redondo" id="btnLinterna" aria-label="Encender linterna" aria-pressed="false" hidden>🔦</button>
+    <span class="hueco" id="huecoDer"></span>
+  </header>
+
+  <main>
+    <div class="visor" id="visor">
+      <video id="video" playsinline muted autoplay></video>
+      <div class="mira" id="mira" hidden></div>
+    </div>
+
+    <p class="mensaje" id="mensaje" role="status" aria-live="polite">Abriendo cámara...</p>
+
+    <button type="button" class="btn btn-azul" id="btnAbrir" hidden>📷 Abrir cámara</button>
+    <a class="btn btn-claro" id="sinCamara" href="#" hidden>No puedo escanear: escribir el código</a>
+  </main>
+
+  <canvas id="lienzo" hidden></canvas>
+
+  <!-- Lector de QR (jsQR). Si un servidor falla, prueba con el otro. -->
+  <script>
+    function cargarLectorRespaldo() {
+      var s = document.createElement('script');
+      s.src = 'https://unpkg.com/jsqr@1.4.0/dist/jsQR.js';
+      document.head.appendChild(s);
+    }
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js" onerror="cargarLectorRespaldo()"></script>
+
+  <script>
+    var video = document.getElementById('video');
+    var mira = document.getElementById('mira');
+    var lienzo = document.getElementById('lienzo');
+    var mensaje = document.getElementById('mensaje');
+    var btnAbrir = document.getElementById('btnAbrir');
+    var btnLinterna = document.getElementById('btnLinterna');
+    var volver = document.getElementById('volver');
+    var sinCamara = document.getElementById('sinCamara');
+
+    function decir(texto, clase) {
+      mensaje.textContent = texto || '';
+      mensaje.className = 'mensaje' + (clase ? ' ' + clase : '');
+    }
+
+    // ===== Dirección de MaqTrack =====
+    // Solo se acepta una dirección de Apps Script: así esta página no puede
+    // usarse para mandar a nadie a otro sitio.
+    function direccionValida(u) {
+      try {
+        var url = new URL(u);
+        return url.protocol === 'https:' &&
+               url.hostname === 'script.google.com' &&
+               /\/(exec|dev)$/.test(url.pathname) &&
+               !url.search && !url.hash;
+      } catch (e) { return false; }
+    }
+
+    var APP = '';
+    (function () {
+      var deLaDireccion = '';
+      try { deLaDireccion = new URLSearchParams(location.search).get('app') || ''; } catch (e) {}
+
+      if (direccionValida(deLaDireccion)) {
+        APP = deLaDireccion;
+        try { localStorage.setItem('maqtrack_app', APP); } catch (e) {}
+      } else {
+        var guardada = '';
+        try { guardada = localStorage.getItem('maqtrack_app') || ''; } catch (e) {}
+        if (direccionValida(guardada)) APP = guardada;
+      }
+    })();
+
+    // ===== Lectura del QR =====
+    var detector = null;
+    if ('BarcodeDetector' in window) {
+      try { detector = new BarcodeDetector({ formats: ['qr_code'] }); } catch (e) { detector = null; }
+    }
+
+    function hayLector() {
+      return !!detector || typeof jsQR === 'function';
+    }
+
+    function leerConJsQR() {
+      var ancho = video.videoWidth, alto = video.videoHeight;
+      if (typeof jsQR !== 'function' || !ancho || !alto) return null;
+      var escala = Math.min(1, 640 / Math.max(ancho, alto));
+      var w = Math.max(1, Math.round(ancho * escala));
+      var h = Math.max(1, Math.round(alto * escala));
+      lienzo.width = w;
+      lienzo.height = h;
+      var ctx = lienzo.getContext('2d', { willReadFrequently: true });
+      ctx.drawImage(video, 0, 0, w, h);
+      var r = jsQR(ctx.getImageData(0, 0, w, h).data, w, h, { inversionAttempts: 'attemptBoth' });
+      return (r && r.data) ? r.data : null;
+    }
+
+    function leerCuadro() {
+      if (!detector) return Promise.resolve(leerConJsQR());
+      return detector.detect(video)
+        .then(function (r) { return (r && r.length && r[0].rawValue) ? r[0].rawValue : null; })
+        .catch(function () { return leerConJsQR(); });
+    }
+
+    // ===== Cámara =====
+    var flujo = null;
+    var escaneando = false;
+    var ultimaLectura = 0;
+    var linternaEncendida = false;
+
+    function pistaVideo() {
+      return flujo ? flujo.getVideoTracks()[0] : null;
+    }
+
+    function detenerCamara() {
+      escaneando = false;
+      if (flujo) {
+        flujo.getTracks().forEach(function (t) { t.stop(); });
+        flujo = null;
+      }
+      video.srcObject = null;
+      mira.hidden = true;
+      btnLinterna.hidden = true;
+      document.getElementById('huecoDer').hidden = false;
+      linternaEncendida = false;
+    }
+
+    function prepararLinterna() {
+      var pista = pistaVideo();
+      var puede = false;
+      try { puede = !!(pista && pista.getCapabilities && pista.getCapabilities().torch); } catch (e) {}
+      btnLinterna.hidden = !puede;
+      document.getElementById('huecoDer').hidden = puede;
+      btnLinterna.classList.remove('encendida');
+      btnLinterna.setAttribute('aria-pressed', 'false');
+    }
+
+    btnLinterna.addEventListener('click', function () {
+      var pista = pistaVideo();
+      if (!pista) return;
+      var nuevo = !linternaEncendida;
+      pista.applyConstraints({ advanced: [{ torch: nuevo }] })
+        .then(function () {
+          linternaEncendida = nuevo;
+          btnLinterna.classList.toggle('encendida', nuevo);
+          btnLinterna.setAttribute('aria-pressed', String(nuevo));
+        })
+        .catch(function () {});
+    });
+
+    function camaraFallo(error) {
+      detenerCamara();
+      btnAbrir.hidden = false;
+      var nombre = error && error.name ? error.name : '';
+      if (nombre === 'NotAllowedError' || nombre === 'SecurityError') {
+        decir('No hay permiso para usar la cámara. Toca el candado junto a la dirección de la página, ' +
+              'permite la cámara y vuelve a intentar.', 'error');
+      } else if (nombre === 'NotFoundError' || nombre === 'OverconstrainedError') {
+        decir('Este equipo no tiene cámara disponible.', 'error');
+      } else if (nombre === 'NotReadableError') {
+        decir('Otra aplicación está usando la cámara. Ciérrala y vuelve a intentar.', 'error');
+      } else {
+        decir('No se pudo abrir la cámara. Vuelve a intentar.', 'error');
+      }
+    }
+
+    function abrirCamara() {
+      if (flujo) return;
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        btnAbrir.hidden = true;
+        decir('Este navegador no puede usar la cámara. Abre MaqTrack en Chrome o Safari.', 'error');
+        return;
+      }
+
+      btnAbrir.hidden = true;
+      decir('Abriendo cámara...');
+
+      navigator.mediaDevices.getUserMedia({
+        video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+        audio: false
+      })
+        .then(function (s) {
+          flujo = s;
+          video.srcObject = s;
+          return video.play();
+        })
+        .then(function () {
+          mira.hidden = false;
+          prepararLinterna();
+          if (!hayLector()) {
+            decir('No se pudo cargar el lector de QR. Revisa tu internet y recarga la página.', 'error');
+            return;
+          }
+          decir('Pon el código QR dentro del cuadro.');
+          escaneando = true;
+          requestAnimationFrame(ciclo);
+        })
+        .catch(camaraFallo);
+    }
+
+    function ciclo(ahora) {
+      if (!escaneando) return;
+      if (ahora - ultimaLectura < 140 || video.readyState < 2) {
+        requestAnimationFrame(ciclo);
+        return;
+      }
+      ultimaLectura = ahora;
+
+      leerCuadro().then(function (texto) {
+        if (!escaneando) return;
+        if (texto && String(texto).trim()) {
+          codigoLeido(String(texto).trim());
+        } else {
+          requestAnimationFrame(ciclo);
+        }
+      });
+    }
+
+    function codigoLeido(codigo) {
+      try { if (navigator.vibrate) navigator.vibrate(120); } catch (e) {}
+      detenerCamara();
+      decir('Código leído: ' + codigo + '. Abriendo MaqTrack...', 'listo');
+      location.href = APP + '?page=escaner&qr=' + encodeURIComponent(codigo.substring(0, 100));
+    }
+
+    // ===== Eventos =====
+    btnAbrir.addEventListener('click', abrirCamara);
+
+    // Al cambiar de app o apagar la pantalla se suelta la cámara; al volver se abre otra vez
+    document.addEventListener('visibilitychange', function () {
+      if (!APP) return;
+      if (document.hidden) {
+        detenerCamara();
+      } else {
+        abrirCamara();
+      }
+    });
+
+    // Si la persona vuelve con el botón "atrás" del celular
+    window.addEventListener('pageshow', function (e) {
+      if (e.persisted && APP) abrirCamara();
+    });
+
+    // ===== Inicio =====
+    if (!APP) {
+      document.getElementById('visor').hidden = true;
+      decir('Abre este escáner desde el botón "Escanear QR" de MaqTrack.', 'error');
+    } else {
+      volver.href = APP;
+      volver.hidden = false;
+      document.getElementById('huecoIzq').hidden = true;
+      sinCamara.href = APP + '?page=escaner';
+      sinCamara.hidden = false;
+      abrirCamara();
+    }
+  </script>
+
+</body>
+</html>
